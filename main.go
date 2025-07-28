@@ -48,10 +48,10 @@ func main() {
 		if d == nil {
 			return nil
 		}
-		if d.IsDir() {
-			return nil
+		if d.IsDir() && d.Name() == ".git" {
+			return filepath.SkipDir
 		}
-		if d.Name() == ".git" {
+		if d.IsDir() {
 			return nil
 		}
 		info, err := d.Info()
