@@ -1,18 +1,13 @@
 package main
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
-	"io/fs"
 	"log"
 	"os"
-	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 
-	"github.com/fmarmol/permos"
 	"github.com/spf13/cobra"
 )
 
@@ -41,6 +36,16 @@ var cmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		// trim extra slash
+		ignoreDirs = func() (ret []string) {
+			for _, dir := range ignoreDirs {
+				dirTrimed := dir
+				dirTrimed = strings.TrimSuffix(dirTrimed, "\\")
+				dirTrimed = strings.TrimSuffix(dirTrimed, "/")
+				ret = append(ret, dirTrimed)
+			}
+			return
+		}()
 		ignoreExts, err := cmd.Flags().GetStringSlice(IGNORE_EXT)
 		if err != nil {
 			return err
@@ -48,80 +53,35 @@ var cmd = &cobra.Command{
 		root := cmd.Flag("root").Value.String()
 		results := make(chan Result)
 		errors := make(chan Error)
-		sem := make(chan struct{}, 10)
 		var wg sync.WaitGroup
 
-		err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-			if d == nil {
-				return nil
-			}
-			if len(ignoreDirs) > 0 && d.IsDir() && slices.Contains(ignoreDirs, d.Name()) {
-				return filepath.SkipDir
-			}
+		err = WalkDir(os.DirFS(root), root, pattern, results, errors, ignoreDirs, ignoreExts, &wg)
+		if err != nil {
+			return err
+		}
 
-			if len(ignoreExts) > 0 && slices.ContainsFunc(ignoreExts, func(e string) bool {
-				return strings.HasSuffix(d.Name(), e)
-			}) {
-				return nil
-			}
+		var wgRead sync.WaitGroup
 
-			if d.IsDir() && d.Name() == ".git" {
-				return filepath.SkipDir
-			}
-			if d.IsDir() {
-				return nil
-			}
-			info, err := d.Info()
-			if err != nil {
-				return err
-			}
-			if info.Mode()&fs.FileMode(permos.UserExec) == fs.FileMode(permos.UserExec) {
-				return nil
-			}
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				sem <- struct{}{}
-				fd, err := os.Open(path)
-				if err != nil {
-					errors <- Error{Path: path, Err: err}
-				}
-				defer fd.Close()
-				scanner := bufio.NewScanner(fd)
-				lineNum := 0
-				for scanner.Scan() {
-					line := scanner.Text()
-					if !strings.Contains(line, pattern) {
-						lineNum++
-						continue
-					}
-					results <- Result{Path: path, LineNum: lineNum + 1, Line: line}
-					lineNum++
-				}
-				<-sem
-			}()
-			return nil
-		})
-
-		finish := make(chan struct{}, 1)
+		wgRead.Add(2)
 		go func() {
+			defer wgRead.Done()
 			fmt.Println("--------Results--------")
 			for result := range results {
 				fmt.Printf("%s:%d: %s\n", result.Path, result.LineNum, result.Line)
 			}
+		}()
+		go func() {
+			defer wgRead.Done()
 			fmt.Println("--------Errors---------")
 			for err := range errors {
 				fmt.Printf("%v: %s\n", err.Path, err.Err.Error())
 			}
-			finish <- struct{}{}
+
 		}()
 		wg.Wait()
 		close(errors)
 		close(results)
-		if err != nil {
-			fmt.Println("Scan finished with err:", err)
-		}
-		<-finish
+		wgRead.Wait()
 		return nil
 	},
 }
